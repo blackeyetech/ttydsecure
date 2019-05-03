@@ -1,0 +1,75 @@
+#!/bin/bash
+
+USER_PARAMS="$@"
+
+# Check if the user AND password have been specified - this is a requirement
+if [[ -z $TTYD_USER || -z $TTYD_PASSWD ]]
+then
+    echo "ERROR: env variables TTYD_USER and TTYD_PASSWD are BOTH required"
+    exit 1
+fi
+
+# Check if the SSL/TLS server key DOES NOT exist - this is possible 
+# if the user may have bind mounted their own certs or this script had been 
+# executed previously
+if [[ ! -f $SERVER_KEY ]] 
+then
+    # They don't, so create new SSL/TLS certs
+    echo "Creating SSL/TLS certs now ..."
+    openssl req -new -x509 -days 365 -nodes -text -out $SERVER_CRT \
+        -keyout $SERVER_KEY -subj "/CN=ttyd"
+    chmod og-rwx $SERVER_KEY
+else
+    # They do, so lets use those if required
+    echo "Using existing SSL/TLS certs"
+fi
+
+# The parameters to pass to ttyd
+PARAMS=""
+
+# Add the SSL parameters
+PARAMS="$PARAMS --ssl --ssl-cert $SERVER_CRT --ssl-key $SERVER_KEY"
+
+# Add the max number of clients parameter
+PARAMS="$PARAMS --max-clients=$TTYD_MAX_CONNS"
+
+# Check if the authentication type is HTTP Basic Authentication
+if [[ $TTYD_AUTH_TYPE == "basic" ]]
+then
+    echo "Using HTTP basic authentication"
+
+    # It is, so add the basic auth credentials parameter
+    PARAMS="$PARAMS --credential $TTYD_USER:$TTYD_PASSWD"
+else
+    echo "Using OS level authentication"
+    
+    # It is not, so we need to create the login user. 
+    # First check if the user already exists
+    id -u $TTYD_USER > /dev/null 2>&1
+    if [[ $? -ne 0 ]]
+    then
+        # It does not, so create it
+        echo "Adding user $TTYD_USER now ..."
+        sudo useradd --shell /bin/bash --create-home $TTYD_USER
+    else
+        # It does, so we didn't
+        echo "User $TTYD_USER already exists"
+    fi
+
+    # Set the password
+    echo "Setting user ${TTYD_USER}s password"
+    sudo usermod --password $(openssl passwd -1 $TTYD_PASSWD) $TTYD_USER
+
+    # Check if we should make the user a sudoer, i.e. var set to "Y" or "y"
+    if [[ $TTYD_SUDOER == "Y" || $TTYD_SUDOER == "y" ]]
+    then
+        # We should, so make add it
+        echo "Adding user $TTYD_USER to sudo ..."
+        sudo usermod -aG sudo $TTYD_USER
+    else   
+        # We shouldn't, so we didn't
+        echo "Not adding user $TTYD_USER to sudo"
+    fi
+fi
+
+exec /ttydbin/ttyd $PARAMS $USER_PARAMS $TTYD_CMD
